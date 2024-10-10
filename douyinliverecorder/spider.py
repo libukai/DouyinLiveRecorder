@@ -29,7 +29,9 @@ from .utils import (
     trace_error_decorator, dict_to_cookie_str
 )
 from .logger import script_path
-from .web_rid import get_sec_user_id
+from .room import get_sec_user_id, get_unique_id
+from . import JS_SCRIPT_PATH
+
 
 no_proxy_handler = urllib.request.ProxyHandler({})
 opener = urllib.request.build_opener(no_proxy_handler)
@@ -173,8 +175,7 @@ def get_douyin_app_stream_data(url: str, proxy_addr: Union[str, None] = None, co
     if cookies:
         headers['Cookie'] = cookies
 
-    def get_app_data():
-        room_id, sec_uid = get_sec_user_id(url=url, proxy_addr=proxy_addr)
+    def get_app_data(room_id, sec_uid):
         api2 = f'https://webcast.amemv.com/webcast/room/reflow/info/?verifyFp=verify_lxj5zv70_7szNlAB7_pxNY_48Vh_ALKF_GA1Uf3yteoOY&type_id=0&live_id=1&room_id={room_id}&sec_user_id={sec_uid}&version_code=99.99.99&app_id=1128'
         json_str2 = get_req(url=api2, proxy_addr=proxy_addr, headers=headers)
         json_data2 = json.loads(json_str2)['data']
@@ -192,12 +193,18 @@ def get_douyin_app_stream_data(url: str, proxy_addr: Union[str, None] = None, co
             room_data = json_data['data'][0]
             room_data['anchor_name'] = json_data['user']['nickname']
         else:
-            room_data = get_app_data()
+            data = get_sec_user_id(url, proxy_addr=proxy_addr)
 
-        if 'stream_url' not in room_data:
-            raise RuntimeError('该直播类型或玩法电脑端暂未支持，请使用app端分享链接进行录制')
+            if data:
+                _room_id, _sec_uid = data
+                room_data = get_app_data(_room_id, _sec_uid)
+            else:
+                unique_id = get_unique_id(url, proxy_addr=proxy_addr)
+                return get_douyin_stream_data(f'https://live.douyin.com/{unique_id}')
 
         if room_data['status'] == 2:
+            if 'stream_url' not in room_data:
+                raise RuntimeError('该直播类型或玩法电脑端暂未支持，请使用app端分享链接进行录制')
             live_core_sdk_data = room_data['stream_url']['live_core_sdk_data']
             pull_datas = room_data['stream_url']['pull_datas']
             if live_core_sdk_data:
@@ -321,7 +328,7 @@ def get_kuaishou_stream_data(url: str, proxy_addr: Union[str, None] = None, cook
 
     try:
         json_str = re.search('<script>window.__INITIAL_STATE__=(.*?);\(function\(\)\{var s;', html_str).group(1)
-        play_list = re.findall('(\{"liveStream".*?),"gameInfo', json_str)[0] + "}"
+        play_list = re.findall('(\\{"liveStream".*?),"gameInfo', json_str)[0] + "}"
         play_list = json.loads(play_list)
     except (AttributeError, IndexError, json.JSONDecodeError) as e:
         print(f"Failed to parse JSON data from {url}. Error: {e}")
@@ -2034,7 +2041,7 @@ def get_twitchtv_stream_data(url: str, proxy_addr: Union[str, None] = None, cook
         play_session_id = random.choice(["bdd22331a986c7f1073628f2fc5b19da", "064bc3ff1722b6f53b0b5b8c01e46ca5"])
         params = {
             "acmb": "e30=",
-            "allow_sourc": "true",
+            "allow_source": "true",
             "browser_family": "firefox",
             "browser_version": "124.0",
             "cdm": "wv",
@@ -2064,26 +2071,45 @@ def get_twitchtv_stream_data(url: str, proxy_addr: Union[str, None] = None, cook
 @trace_error_decorator
 def get_liveme_stream_url(url: str, proxy_addr: Union[str, None] = None, cookies: Union[str, None] = None) -> \
         Dict[str, Any]:
+
     headers = {
-        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-        'if-none-match': '"5056-h/Mk04yXaLRQmg+4iqhJH8Sa8l0"',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+        'origin': 'https://www.liveme.com',
+        'referer': 'https://www.liveme.com',
+        'user-agent': 'Mozilla/5.0 (Linux; Android 8.0.0; SM-G955U Build/R16NW) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
     }
     if cookies:
         headers['Cookie'] = cookies
 
-    html_str = get_req(url=url, proxy_addr=proxy_addr, headers=headers, abroad=True)
-    video_url = re.search('hlsvideosource:"(.*?)",sdkstreamid', html_str)
-    anchor_name = re.search('<title>(.*?) ', html_str).group(1)
+    room_id = url.split("/index.html")[0].rsplit('/', maxsplit=1)[-1]
+    sign_data = execjs.compile(open(f'{JS_SCRIPT_PATH}/liveme.js').read()).call('sign', room_id, f'{JS_SCRIPT_PATH}/crypto-js.min.js')
+    lm_s_sign = sign_data.pop("lm_s_sign")
+    tongdun_black_box = sign_data.pop("tongdun_black_box")
+    platform = sign_data.pop("os")
+    headers['lm-s-sign'] = lm_s_sign
+
+    params = {
+        'alias': 'liveme',
+        'tongdun_black_box': tongdun_black_box,
+        'os': platform,
+    }
+
+    api = f'https://live.liveme.com/live/queryinfosimple?{urllib.parse.urlencode(params)}'
+    json_str = get_req(api, data=sign_data, proxy_addr=proxy_addr, headers=headers, abroad=True)
+    json_data = json.loads(json_str)
+    stream_data = json_data['data']['video_info']
+    anchor_name = stream_data['uname']
+    live_status = stream_data['status']
     result = {
         "anchor_name": anchor_name,
         "is_live": False,
     }
-    if video_url:
-        play_url = video_url.group(1).replace('\\u002F', '/')
+    if live_status == "0":
         result["is_live"] = True
-        result['m3u8_url'] = play_url
-        result['record_url'] = play_url
+        m3u8_url = stream_data['hlsvideosource']
+        flv_url = stream_data['videosource']
+        result['m3u8_url'] = m3u8_url
+        result['flv_url'] = flv_url
+        result['record_url'] = m3u8_url if m3u8_url else flv_url
     return result
 
 
